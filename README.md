@@ -1,6 +1,6 @@
 # FlibustaBot
 
-Telegram-бот для поиска и скачивания книг с [flibusta.is](https://flibusta.is).
+Telegram-бот для поиска и скачивания книг.
 
 ## Требования
 
