@@ -1,0 +1,15 @@
+[Unit]
+Description=FlibustaBot Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/FlibustaBot
+EnvironmentFile=/home/ubuntu/FlibustaBot/.env
+ExecStart=/home/ubuntu/FlibustaBot/.venv/bin/python -m main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

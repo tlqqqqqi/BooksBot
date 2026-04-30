@@ -1,0 +1,20 @@
+[project]
+name = "flibusta-bot"
+version = "0.1.0"
+description = "Telegram bot that searches and downloads books from flibusta.is"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13",
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "pydantic-settings>=2.4",
+    "loguru>=0.7",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
