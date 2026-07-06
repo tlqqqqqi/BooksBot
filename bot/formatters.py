@@ -1,4 +1,5 @@
 import html
+
 from providers.base import Book, SearchHit
 
 _MAX_ANNOTATION = 3500

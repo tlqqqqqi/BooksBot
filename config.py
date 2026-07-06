@@ -1,4 +1,3 @@
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_USER_AGENT = (
@@ -13,7 +12,9 @@ class Settings(BaseSettings):
     bot_token: str
     bot_password: str = "secret"
     flibusta_base_url: str = "https://flibusta.is"
-    request_timeout: int = 20
+    # Чтение может занимать десятки секунд: flibusta конвертирует форматы на лету
+    request_timeout: int = 60
+    connect_timeout: int = 10
     user_agent: str = DEFAULT_USER_AGENT
     log_level: str = "INFO"
     max_file_size_mb: int = 50

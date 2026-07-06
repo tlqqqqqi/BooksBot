@@ -1,3 +1,4 @@
+import asyncio
 import re
 from urllib.parse import quote
 
@@ -21,6 +22,9 @@ _DIRECT_FORMATS = frozenset({"fb2", "epub", "mobi", "txt", "rtf", "lit", "lrf"})
 # Formats served via /b/<id>/download endpoint
 _DOWNLOAD_ENDPOINT_FORMATS = frozenset({"pdf", "djvu"})
 
+# Пауза перед повтором после сбоя: flibusta эпизодически отдаёт 5xx и рвёт соединения
+_RETRY_DELAYS = (1.0, 3.0)
+
 
 def _text(node) -> str:
     """Extract text from a node, preserving internal whitespace (avoids stripping spaces around <b> tags)."""
@@ -30,8 +34,9 @@ def _text(node) -> str:
 class FlibustaProvider(BookProvider):
     name = "flibusta"
 
-    def __init__(self) -> None:
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._client = httpx.AsyncClient(
+            transport=transport,
             base_url=settings.flibusta_base_url,
             headers={
                 "User-Agent": settings.user_agent,
@@ -40,22 +45,40 @@ class FlibustaProvider(BookProvider):
                 "Accept-Encoding": "gzip, deflate",
             },
             follow_redirects=True,
-            timeout=httpx.Timeout(settings.request_timeout),
+            timeout=httpx.Timeout(settings.request_timeout, connect=settings.connect_timeout),
         )
 
     # ------------------------------------------------------------------ HTTP
 
+    async def _request(self, path: str) -> httpx.Response:
+        """GET с ретраями: flibusta эпизодически отдаёт 5xx и рвёт соединения, некэшированные
+        страницы/конвертация форматов бывают медленными — одиночный запрос слишком хрупок."""
+        last_attempt = len(_RETRY_DELAYS)
+        for attempt in range(last_attempt + 1):
+            try:
+                r = await self._client.get(path)
+                r.raise_for_status()
+                return r
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code == 404:
+                    raise NotFoundError(path) from e
+                err = ProviderError(f"HTTP {code}: {path}")
+                cause: Exception = e
+                retryable = code >= 500
+            except httpx.RequestError as e:
+                err = ProviderError(f"Network error: {type(e).__name__}({e}): {path}")
+                cause = e
+                retryable = True
+            if not retryable or attempt == last_attempt:
+                raise err from cause
+            delay = _RETRY_DELAYS[attempt]
+            logger.info("{} — retry {}/{} in {}s", err, attempt + 1, last_attempt, delay)
+            await asyncio.sleep(delay)
+        raise AssertionError("unreachable")
+
     async def _get(self, path: str) -> str:
-        try:
-            r = await self._client.get(path)
-            r.raise_for_status()
-            return r.text
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise NotFoundError(path) from e
-            raise ProviderError(f"HTTP {e.response.status_code}: {path}") from e
-        except httpx.RequestError as e:
-            raise ProviderError(f"Network error: {e}") from e
+        return (await self._request(path)).text
 
     # ----------------------------------------------------------------- Search
 
@@ -203,13 +226,7 @@ class FlibustaProvider(BookProvider):
 
     async def download(self, book_id: str, fmt: str) -> DownloadedFile:
         path = f"/b/{book_id}/download" if fmt in _DOWNLOAD_ENDPOINT_FORMATS else f"/b/{book_id}/{fmt}"
-        try:
-            r = await self._client.get(path)
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise ProviderError(f"Download failed: HTTP {e.response.status_code}") from e
-        except httpx.RequestError as e:
-            raise ProviderError(f"Download network error: {e}") from e
+        r = await self._request(path)
 
         content = r.content
         cd = r.headers.get("content-disposition", "")
