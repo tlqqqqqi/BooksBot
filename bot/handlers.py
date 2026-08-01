@@ -1,3 +1,6 @@
+import random
+import time
+
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -6,18 +9,21 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from loguru import logger
 
 from bot import auth
-from bot.callback_data import AuthorCb, BookCb, DownloadCb, PageCb
-from bot.formatters import format_author_books, format_book, format_search_results
-from bot.keyboards import book_formats_kb, search_results_kb
+from bot.callback_data import AuthorCb, BookCb, DownloadCb, PageCb, WatchCb
+from bot.formatters import escape, format_author_books, format_book, format_search_results, format_watches
+from bot.keyboards import book_card_kb, search_results_kb, watches_kb
 from config import settings
-from providers.base import BookProvider, NotFoundError, ProviderError
+from providers.base import BookProvider, NotFoundError, ProviderError, WatchKind, WatchSource
+from storage import Storage
 
 router = Router()
 
 _WELCOME = (
     "👋 <b>FlibustaBot</b>\n\n"
     "Отправьте название книги или имя автора — я найду всё, что есть на Флибусте.\n\n"
-    "Можно скачать книгу в форматах <b>fb2, epub, mobi, pdf</b> и других."
+    "Можно скачать книгу в форматах <b>fb2, epub, mobi, pdf</b> и других.\n\n"
+    "🔔 Кнопки «Следить…» на карточке книги и под поиском подпишут вас на новинки; "
+    "список подписок — /watches."
 )
 
 
@@ -31,7 +37,8 @@ class SearchState(StatesGroup):
     author_name = State()
 
 
-def setup(provider: BookProvider) -> Router:
+def setup(provider: BookProvider, storage: Storage) -> Router:
+    watchable = isinstance(provider, WatchSource)
 
     @router.message(Command("start"))
     async def cmd_start(message: Message, state: FSMContext) -> None:
@@ -51,7 +58,16 @@ def setup(provider: BookProvider) -> Router:
         else:
             await message.answer("Неверный пароль. Попробуйте ещё раз.")
 
-    @router.message(F.text)
+    @router.message(Command("watches"))
+    async def cmd_watches(message: Message) -> None:
+        if not auth.is_authorized(message.from_user.id):
+            await message.answer("Введите /start для начала работы.")
+            return
+        watches = await storage.list_watches(message.from_user.id)
+        await message.answer(format_watches(watches), parse_mode="HTML", reply_markup=watches_kb(watches))
+
+    # ~startswith("/"): команды не должны улетать в поиск (catch-all регистрируется последним)
+    @router.message(F.text & ~F.text.startswith("/"))
     async def handle_search(message: Message, state: FSMContext) -> None:
         if not auth.is_authorized(message.from_user.id):
             await message.answer("Введите /start для начала работы.")
@@ -60,7 +76,7 @@ def setup(provider: BookProvider) -> Router:
         if not query:
             return
         await state.update_data(query=query, author_id="", author_name="")
-        await _do_search(message, state, provider, query=query, page=1, edit=False)
+        await _do_search(message, state, provider, query=query, page=1, edit=False, watch_query=watchable)
 
     @router.callback_query(PageCb.filter())
     async def handle_page(callback: CallbackQuery, callback_data: PageCb, state: FSMContext) -> None:
@@ -80,7 +96,9 @@ def setup(provider: BookProvider) -> Router:
             if not query:
                 await callback.message.answer("Начните поиск заново — отправьте запрос текстом.")
                 return
-            await _do_search(callback.message, state, provider, query=query, page=page, edit=True)
+            await _do_search(
+                callback.message, state, provider, query=query, page=page, edit=True, watch_query=watchable
+            )
 
     @router.callback_query(BookCb.filter())
     async def handle_book(callback: CallbackQuery, callback_data: BookCb, state: FSMContext) -> None:
@@ -100,12 +118,12 @@ def setup(provider: BookProvider) -> Router:
             return
 
         text = format_book(book)
-        kb = book_formats_kb(book)
+        kb = book_card_kb(book, with_watch=watchable)
         if book.downloads:
             text += "\n\n<b>Скачать:</b>"
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
         else:
-            await callback.message.answer(text + "\n\n⚠️ Форматы для скачивания не найдены.", parse_mode="HTML")
+            text += "\n\n⚠️ Форматы для скачивания не найдены."
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
 
     @router.callback_query(AuthorCb.filter())
     async def handle_author(callback: CallbackQuery, callback_data: AuthorCb, state: FSMContext) -> None:
@@ -155,6 +173,66 @@ def setup(provider: BookProvider) -> Router:
         doc = BufferedInputFile(file.content, filename=file.filename)
         await bot.send_document(callback.message.chat.id, doc)
 
+    @router.callback_query(WatchCb.filter())
+    async def handle_watch(callback: CallbackQuery, callback_data: WatchCb, state: FSMContext) -> None:
+        if not auth.is_authorized(callback.from_user.id):
+            await callback.answer("Сначала введите /start.", show_alert=True)
+            return
+        user_id = callback.from_user.id
+
+        if callback_data.action == "del":
+            deleted = await storage.delete_watch(int(callback_data.target), user_id)
+            await callback.answer("Подписка удалена." if deleted else "Уже удалена.")
+            watches = await storage.list_watches(user_id)
+            await callback.message.edit_text(
+                format_watches(watches), parse_mode="HTML", reply_markup=watches_kb(watches)
+            )
+            return
+
+        if not watchable:
+            await callback.answer("Подписки недоступны.", show_alert=True)
+            return
+        kind: WatchKind | None = {"s": "series", "a": "author", "q": "query"}.get(callback_data.action)
+        if kind is None:
+            await callback.answer()
+            return
+        target = callback_data.target
+        if kind == "query" and not target:  # длинный запрос не влез в callback — берём из FSM
+            data = await state.get_data()
+            target = (data.get("query") or "").strip()
+            if not target:
+                await callback.answer("Начните поиск заново — отправьте запрос текстом.", show_alert=True)
+                return
+
+        await callback.answer("⏳ Подписываю…")
+        try:
+            snapshot = await provider.watch_entries(kind, target)
+        except ProviderError as e:
+            logger.warning("watch_entries {}/{}: {}", kind, target, e)
+            await callback.message.answer("Не удалось создать подписку. Попробуйте позже.")
+            return
+        if not snapshot.complete:
+            await callback.message.answer(
+                "По этой цели слишком много книг — подпишитесь на серию или конкретного автора."
+            )
+            return
+
+        label = target if kind == "query" else (snapshot.label or f"#{target}")
+        jitter = 0.9 + 0.2 * random.random()
+        next_check_at = int(time.time() + settings.watch_interval_hours * 3600 * jitter)
+        watch_id = await storage.add_watch(
+            user_id, callback.message.chat.id, kind, target, label, snapshot.entries, next_check_at
+        )
+        if watch_id is None:
+            await callback.message.answer("Такая подписка уже есть — /watches.")
+            return
+        kind_word = {"series": "серией", "author": "автором", "query": "запросом"}[kind]
+        await callback.message.answer(
+            f"✅ Слежу за {kind_word} <b>«{escape(label)}»</b> — сейчас книг: {len(snapshot.entries)}.\n"
+            "Пришлю уведомление, когда появится новая. Подписки: /watches",
+            parse_mode="HTML",
+        )
+
     return router
 
 
@@ -168,6 +246,7 @@ async def _do_search(
     query: str,
     page: int,
     edit: bool,
+    watch_query: bool = False,
 ) -> None:
     try:
         hits, has_next = await provider.search(query, page=page)
@@ -178,7 +257,9 @@ async def _do_search(
         return
 
     text = format_search_results(hits, query, page)
-    kb = search_results_kb(hits[:10], page=page, has_next=has_next, kind="search")
+    kb = search_results_kb(
+        hits[:10], page=page, has_next=has_next, kind="search", watch_query=query if watch_query else None
+    )
 
     if edit:
         await message.edit_text(text, parse_mode="HTML", reply_markup=kb)

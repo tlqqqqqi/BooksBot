@@ -21,6 +21,10 @@ def is_authorized(user_id: int) -> bool:
     return user_id in _authorized
 
 
+def all_users() -> set[int]:
+    return set(_authorized)
+
+
 def authorize(user_id: int) -> None:
     if user_id in _authorized:
         return

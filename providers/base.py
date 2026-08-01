@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 HitKind = Literal["book", "author"]
+WatchKind = Literal["series", "author", "query"]
 
 
 @dataclass(slots=True)
@@ -27,6 +28,26 @@ class Book:
     annotation: str | None
     genres: list[str] = field(default_factory=list)
     downloads: list[DownloadLink] = field(default_factory=list)
+    author_id: str | None = None
+    series_id: str | None = None
+    series_name: str | None = None
+
+
+@dataclass(slots=True)
+class WatchEntry:
+    book_id: str
+    title: str
+    author: str | None = None
+    has_files: bool = False
+
+
+@dataclass(slots=True)
+class WatchSnapshot:
+    """Полный список книг цели подписки. complete=False — обход упёрся в лимит страниц."""
+
+    label: str | None
+    entries: list[WatchEntry]
+    complete: bool = True
 
 
 @dataclass(slots=True)
@@ -42,6 +63,15 @@ class ProviderError(Exception):
 
 class NotFoundError(ProviderError):
     """Запрошенный ресурс отсутствует."""
+
+
+class WatchSource(ABC):
+    """Опциональная способность провайдера: машиночитаемый список книг серии/автора/запроса.
+
+    Провайдер без этой способности просто не показывает кнопки подписки."""
+
+    @abstractmethod
+    async def watch_entries(self, kind: WatchKind, target: str) -> WatchSnapshot: ...
 
 
 class BookProvider(ABC):

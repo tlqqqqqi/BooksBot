@@ -15,5 +15,8 @@ build/
 .pytest_cache/
 *.log
 authorized_users.txt
+*.db
+*.db-wal
+*.db-shm
 CLAUDE.md
 .claude/

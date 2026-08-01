@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     user_agent: str = DEFAULT_USER_AGENT
     log_level: str = "INFO"
     max_file_size_mb: int = 50
+    db_path: str = "flibusta_bot.db"
+    watch_interval_hours: float = 3.0
+    # Анонс новой версии уходит один раз, но только когда флаг включён:
+    # деплой → потестить руками → SEND_ANNOUNCEMENT=true → рестарт
+    send_announcement: bool = False
 
     @property
     def max_file_size_bytes(self) -> int:

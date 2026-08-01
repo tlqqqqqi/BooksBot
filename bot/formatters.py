@@ -1,6 +1,7 @@
 import html
 
 from providers.base import Book, SearchHit
+from storage import Watch
 
 _MAX_ANNOTATION = 3500
 _FORMAT_EMOJI = {"fb2": "📖", "epub": "📕", "mobi": "📗", "pdf": "📄", "djvu": "🗒"}
@@ -46,3 +47,17 @@ def format_author_books(hits: list[SearchHit], author_name: str, page: int) -> s
 
 def fmt_emoji(fmt: str) -> str:
     return _FORMAT_EMOJI.get(fmt, "💾")
+
+
+_WATCH_KIND_EMOJI = {"series": "📚", "author": "✍️", "query": "🔎"}
+_WATCH_KIND_NAME = {"series": "серия", "author": "автор", "query": "запрос"}
+
+
+def format_watches(watches: list[Watch]) -> str:
+    if not watches:
+        return "Подписок нет. Кнопки «🔔 Следить…» — на карточке книги и под результатами поиска."
+    lines = [
+        f"{_WATCH_KIND_EMOJI[w.kind]} <b>{escape(w.label)}</b> ({_WATCH_KIND_NAME[w.kind]})"
+        for w in watches
+    ]
+    return "<b>Ваши подписки:</b>\n" + "\n".join(lines) + "\n\nНажмите, чтобы удалить:"

@@ -9,6 +9,7 @@ dependencies = [
     "selectolax>=0.3.21",
     "pydantic-settings>=2.4",
     "loguru>=0.7",
+    "aiosqlite>=0.22.1",
 ]
 
 [tool.pytest.ini_options]

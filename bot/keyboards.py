@@ -1,9 +1,10 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.callback_data import AuthorCb, BookCb, DownloadCb, PageCb
+from bot.callback_data import AuthorCb, BookCb, DownloadCb, PageCb, WatchCb
 from bot.formatters import fmt_emoji
 from providers.base import Book, SearchHit
+from storage import Watch
 
 _PAGE_SIZE = 10
 
@@ -14,6 +15,7 @@ def search_results_kb(
     has_next: bool,
     kind: str = "search",
     target_id: str = "",
+    watch_query: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for hit in hits:
@@ -44,6 +46,14 @@ def search_results_kb(
     builder.adjust(1)
     if nav:
         builder.row(*nav)
+    if watch_query is not None:
+        # Запрос кладём прямо в callback, чтобы кнопка была привязана к своему сообщению
+        # и переживала рестарт; не влез в 64 байта — фолбэк на последний query из FSM.
+        try:
+            cb = WatchCb(action="q", target=watch_query).pack()
+        except ValueError:
+            cb = WatchCb(action="q", target="").pack()
+        builder.row(InlineKeyboardButton(text="🔔 Следить за новинками по этому запросу", callback_data=cb))
     return builder.as_markup()
 
 
@@ -56,4 +66,37 @@ def book_formats_kb(book: Book) -> InlineKeyboardMarkup:
             callback_data=DownloadCb(book_id=book.id, fmt=dl.format),
         )
     builder.adjust(3)
+    return builder.as_markup()
+
+
+def book_card_kb(book: Book, with_watch: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки карточки книги: форматы + подписка на серию/автора."""
+    builder = InlineKeyboardBuilder()
+    builder.attach(InlineKeyboardBuilder.from_markup(book_formats_kb(book)))
+    if with_watch:
+        if book.series_id:
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"🔔 Следить за серией «{book.series_name}»"[:64],
+                    callback_data=WatchCb(action="s", target=book.series_id).pack(),
+                )
+            )
+        if book.author_id:
+            builder.row(
+                InlineKeyboardButton(
+                    text="🔔 Следить за автором",
+                    callback_data=WatchCb(action="a", target=book.author_id).pack(),
+                )
+            )
+    return builder.as_markup()
+
+
+def watches_kb(watches: list[Watch]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for w in watches:
+        builder.button(
+            text=f"❌ {w.label}"[:64],
+            callback_data=WatchCb(action="del", target=str(w.id)),
+        )
+    builder.adjust(1)
     return builder.as_markup()

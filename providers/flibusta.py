@@ -1,5 +1,7 @@
 import asyncio
 import re
+import xml.etree.ElementTree as ET
+from collections import Counter
 from urllib.parse import quote
 
 import httpx
@@ -15,6 +17,10 @@ from providers.base import (
     NotFoundError,
     ProviderError,
     SearchHit,
+    WatchEntry,
+    WatchKind,
+    WatchSnapshot,
+    WatchSource,
 )
 
 # Formats served directly at /b/<id>/<fmt>
@@ -25,13 +31,17 @@ _DOWNLOAD_ENDPOINT_FORMATS = frozenset({"pdf", "djvu"})
 # Пауза перед повтором после сбоя: flibusta эпизодически отдаёт 5xx и рвёт соединения
 _RETRY_DELAYS = (1.0, 3.0)
 
+_ATOM = "{http://www.w3.org/2005/Atom}"
+# Потолок обхода OPDS-пагинации (20 книг/стр.). Упёрлись — snapshot помечается complete=False.
+_OPDS_MAX_PAGES = 10
+
 
 def _text(node) -> str:
     """Extract text from a node, preserving internal whitespace (avoids stripping spaces around <b> tags)."""
     return re.sub(r"\s+", " ", node.text(strip=False)).strip()
 
 
-class FlibustaProvider(BookProvider):
+class FlibustaProvider(BookProvider, WatchSource):
     name = "flibusta"
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -147,10 +157,22 @@ class FlibustaProvider(BookProvider):
 
         # Author: first /a/<numeric_id> link on the page
         author: str | None = None
+        author_id: str | None = None
         for a in tree.css('a[href^="/a/"]'):
             aid = a.attributes.get("href", "").split("/")[-1]
             if aid.isdigit():
                 author = _text(a)
+                author_id = aid
+                break
+
+        # Series: first /s/<numeric_id> link
+        series_id: str | None = None
+        series_name: str | None = None
+        for a in tree.css('a[href^="/s/"]'):
+            sid = a.attributes.get("href", "").split("/")[-1]
+            if sid.isdigit() and _text(a):
+                series_id = sid
+                series_name = _text(a)
                 break
 
         # Annotation: content between <h2>Аннотация</h2> and <hr>
@@ -166,7 +188,17 @@ class FlibustaProvider(BookProvider):
         # Download links: /b/<id>/fb2, /b/<id>/epub, etc.
         downloads = self._parse_downloads(book_id, html)
 
-        return Book(id=book_id, title=title, author=author, annotation=annotation, genres=genres, downloads=downloads)
+        return Book(
+            id=book_id,
+            title=title,
+            author=author,
+            annotation=annotation,
+            genres=genres,
+            downloads=downloads,
+            author_id=author_id,
+            series_id=series_id,
+            series_name=series_name,
+        )
 
     def _parse_downloads(self, book_id: str, html: str) -> list[DownloadLink]:
         base = f"/b/{book_id}/"
@@ -193,6 +225,85 @@ class FlibustaProvider(BookProvider):
                 result.append(DownloadLink(format=fmt, url=settings.flibusta_base_url + href))
 
         return result
+
+    # ----------------------------------------------------------------- OPDS
+
+    async def watch_entries(self, kind: WatchKind, target: str) -> WatchSnapshot:
+        """Полный список книг цели через OPDS: стабильнее HTML-вёрстки и содержит
+        acquisition-ссылки — признак, что файлы реально доступны для скачивания."""
+        if kind == "series":
+            path = f"/opds/sequencebooks/{target}"
+        elif kind == "author":
+            path = f"/opds/author/{target}/alphabet"
+        else:
+            path = f"/opds/search?searchType=books&searchTerm={quote(target)}"
+
+        entries: list[WatchEntry] = []
+        feed_title: str | None = None
+        seen_pages: set[str] = set()
+        complete = False
+        for _ in range(_OPDS_MAX_PAGES):
+            seen_pages.add(path)
+            xml_text = await self._get(path)
+            try:
+                feed = ET.fromstring(xml_text)
+            except ET.ParseError as e:
+                raise ProviderError(f"OPDS parse error: {e}: {path}") from e
+            if feed.tag != f"{_ATOM}feed":
+                raise ProviderError(f"OPDS: not an Atom feed: {path}")
+            if feed_title is None:
+                feed_title = (feed.findtext(f"{_ATOM}title") or "").strip() or None
+            entries.extend(self._parse_opds_entries(feed))
+            next_href = next(
+                (
+                    link.get("href")
+                    for link in feed.findall(f"{_ATOM}link")
+                    if link.get("rel") == "next" and link.get("href")
+                ),
+                None,
+            )
+            if not next_href:
+                complete = True
+                break
+            if not next_href.startswith("/"):  # чужой хост или мусор вместо относительной ссылки
+                raise ProviderError(f"OPDS: suspicious next link: {next_href!r}")
+            if next_href in seen_pages:  # защита от зацикленной пагинации
+                raise ProviderError(f"OPDS pagination loop: {next_href}")
+            path = next_href
+
+        label = self._watch_label(kind, feed_title, entries)
+        logger.debug("watch_entries {}/{} → {} books, complete={}", kind, target, len(entries), complete)
+        return WatchSnapshot(label=label, entries=entries, complete=complete)
+
+    @staticmethod
+    def _parse_opds_entries(feed: ET.Element) -> list[WatchEntry]:
+        result: list[WatchEntry] = []
+        for entry in feed.findall(f"{_ATOM}entry"):
+            book_id: str | None = None
+            has_files = False
+            for link in entry.findall(f"{_ATOM}link"):
+                href = link.get("href", "")
+                m = re.match(r"/b/(\d+)", href)
+                if m:
+                    book_id = book_id or m.group(1)
+                    if (link.get("rel") or "").startswith("http://opds-spec.org/acquisition"):
+                        has_files = True
+            if not book_id:
+                continue  # навигационная запись каталога, не книга
+            title = (entry.findtext(f"{_ATOM}title") or "").strip() or f"Книга #{book_id}"
+            author = (entry.findtext(f"{_ATOM}author/{_ATOM}name") or "").strip() or None
+            result.append(WatchEntry(book_id=book_id, title=title, author=author, has_files=has_files))
+        return result
+
+    @staticmethod
+    def _watch_label(kind: WatchKind, feed_title: str | None, entries: list[WatchEntry]) -> str | None:
+        if kind == "series" and feed_title:
+            return re.sub(r"^Книги в серии\s+", "", feed_title).strip() or None
+        if kind == "author":
+            # Заголовок alphabet-ленты бесполезен («Книги по алфавиту») — берём имя из записей
+            authors = Counter(e.author for e in entries if e.author)
+            return authors.most_common(1)[0][0] if authors else None
+        return None
 
     # --------------------------------------------------------------- Author
 

@@ -18,3 +18,8 @@ class PageCb(CallbackData, prefix="pg"):
     page: int
     kind: str  # "search" | "author"
     target_id: str  # author_id for kind="author", empty for kind="search"
+
+
+class WatchCb(CallbackData, prefix="w"):
+    action: str  # "s" (серия) | "a" (автор) | "q" (запрос) | "del"
+    target: str  # series_id / author_id / watch_id; для "q" пусто — запрос берётся из FSM
