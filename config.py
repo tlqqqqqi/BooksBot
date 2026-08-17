@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     bot_token: str
     bot_password: str = "secret"
     flibusta_base_url: str = "https://flibusta.is"
+    # Зеркал libgen несколько (bz/vg/li/la/gl), они меняются и отвечают неравномерно —
+    # держим в .env, чтобы переключаться без правки кода.
+    libgen_base_url: str = "https://libgen.bz"
     # Чтение может занимать десятки секунд: flibusta конвертирует форматы на лету
     request_timeout: int = 60
     connect_timeout: int = 10

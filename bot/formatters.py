@@ -31,11 +31,13 @@ def format_book(book: Book) -> str:
     )
 
 
-def format_search_results(hits: list[SearchHit], query: str, page: int) -> str:
+def format_search_results(hits: list[SearchHit], query: str, page: int, source: str | None = None) -> str:
     q = escape(query)
+    # Источник подписываем только когда он не единственный — иначе шум в каждом сообщении.
+    where = f" на {escape(source)}" if source else ""
     if not hits:
-        return f'По запросу <b>"{q}"</b> ничего не найдено.'
-    return f'Результаты поиска по <b>"{q}"</b> (стр. {page}):\nВыберите книгу или автора:'
+        return f'По запросу <b>"{q}"</b>{where} ничего не найдено.'
+    return f'Результаты поиска по <b>"{q}"</b>{where} (стр. {page}):\nВыберите книгу или автора:'
 
 
 def format_author_books(hits: list[SearchHit], author_name: str, page: int) -> str:
